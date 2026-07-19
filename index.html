@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>EuroMillions Engine v3.0</title>
+<style>
+:root{--bg:#07101f;--card:#101b31;--line:#2d4773;--text:#f4f7ff;--muted:#aebbd2;--blue:#79a9ff;--red:#ff8798;--green:#7fe0a1}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:850px;margin:auto;padding:28px 18px 70px} .badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:9px 14px;color:var(--blue)}
+h1{font-size:clamp(36px,8vw,64px);margin:24px 0 12px} p{color:var(--muted);line-height:1.55}
+.card{background:var(--card);border:1px solid var(--line);border-radius:24px;padding:22px;margin-top:24px}
+textarea{width:100%;min-height:280px;background:#06101f;color:var(--text);border:1px solid var(--line);border-radius:18px;padding:15px;font-size:17px;line-height:1.42}
+button{border:0;border-radius:16px;padding:15px 18px;font-size:17px;font-weight:700;margin:10px 8px 0 0;background:var(--blue);color:#07101f}
+button.secondary{background:#23375d;color:white} button.danger{background:#61212d;color:#ffd9df}
+.status{margin-top:14px;font-weight:700} .ok{color:var(--green)} .bad{color:var(--red)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:16px}
+.stat{background:#081427;border:1px solid var(--line);border-radius:16px;padding:16px} .stat b{font-size:28px;display:block}
+.nums{display:flex;flex-wrap:wrap;gap:9px;margin-top:12px} .ball{width:42px;height:42px;border-radius:50%;background:#eef4ff;color:#07101f;display:grid;place-items:center;font-weight:800}
+.star{background:#ffd86b} small{color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<span class="badge">EuroMillions Engine v3.0 • BUILD 3001</span>
+<h1>EuroMillions Analyzer</h1>
+<p>Повністю нова версія. Вона завантажує рівно 100 тиражів окремими рядками та виконує внутрішню самоперевірку перед аналізом.</p>
+
+<section class="card">
+<h2>1. Історичні тиражі</h2>
+<textarea id="draws" spellcheck="false" placeholder="Кожен тираж окремим рядком: 12-21-23-34-40-9-10"></textarea>
+<div>
+<button id="load">Завантажити 100 тиражів</button>
+<button id="clear" class="danger">Очистити</button>
+<button id="analyze">Аналізувати</button>
+</div>
+<div id="status" class="status">Готово до запуску.</div>
+<small>База: 100 тиражів, новіші зверху. Формат: 5 основних чисел + 2 Lucky Stars.</small>
+</section>
+
+<section class="card">
+<h2>2. Результат</h2>
+<div id="summary" class="grid"></div>
+<h3>Найчастіші основні числа</h3><div id="hot" class="nums"></div>
+<h3>Найчастіші Lucky Stars</h3><div id="stars" class="nums"></div>
+</section>
+</main>
+
+<script>
+(function(){
+"use strict";
+var REAL_DRAWS=["12-21-23-34-40-9-10", "10-19-37-42-47-9-12", "2-14-28-33-48-8-10", "5-29-33-45-47-5-8", "2-12-17-25-39-1-2", "1-8-37-44-48-2-6", "6-16-26-34-35-11-12", "3-33-36-45-46-5-6", "8-34-39-41-42-2-7", "18-25-31-37-45-4-9", "4-7-14-22-23-1-7", "2-7-23-44-46-3-5", "5-6-16-17-49-2-12", "6-9-17-18-42-7-9", "5-14-18-31-35-2-12", "6-23-25-35-37-6-12", "6-22-26-31-37-5-8", "2-12-20-38-45-2-5", "3-10-38-41-43-2-9", "4-26-32-35-36-5-7", "2-17-19-34-37-8-11", "3-4-8-20-31-6-8", "3-9-42-46-47-1-11", "26-29-41-46-47-8-9", "25-26-30-40-45-1-5", "13-16-29-40-47-3-4", "22-23-28-41-47-6-8", "1-2-4-28-44-5-12", "10-13-14-38-41-6-9", "11-14-19-36-49-6-7", "8-27-29-46-49-2-10", "5-8-10-33-38-2-7", "4-10-43-44-48-2-4", "12-16-17-18-27-1-3", "5-12-16-37-46-8-10", "5-17-28-33-41-3-9", "13-17-26-41-48-4-10", "12-14-27-44-50-4-12", "15-16-19-28-37-6-9", "6-7-24-34-50-5-7", "14-24-27-39-42-6-10", "10-27-40-43-47-6-10", "13-24-28-33-35-5-9", "1-4-6-10-41-5-12", "9-13-31-37-40-6-9", "1-17-19-34-42-5-8", "10-13-20-23-24-6-11", "26-27-28-34-37-4-9", "14-18-31-35-46-7-11", "4-23-42-43-47-3-9", "4-5-13-21-42-3-10", "11-18-19-22-50-1-11", "5-17-24-29-50-5-10", "6-10-18-44-47-2-10", "1-7-10-26-34-2-4", "5-14-17-18-31-10-12", "8-27-42-44-46-1-10", "11-26-29-34-44-1-10", "12-22-32-36-48-3-4", "8-26-27-29-44-11-12", "17-21-39-43-44-1-11", "14-16-40-41-44-2-10", "7-25-30-37-41-5-11", "2-8-13-29-49-2-11", "9-15-25-34-46-8-12", "4-13-14-20-41-6-12", "5-29-33-39-42-3-9", "6-11-17-35-44-3-7", "17-19-29-35-48-5-9", "2-4-15-21-48-6-12", "9-26-27-45-48-8-9", "4-22-32-36-47-2-10", "11-21-39-40-43-2-8", "6-9-25-28-45-1-4", "5-14-38-43-45-7-11", "7-8-24-35-49-2-12", "7-8-25-31-45-7-12", "5-24-29-40-42-6-12", "13-35-39-44-47-3-5", "5-8-14-16-18-3-10", "6-7-17-20-21-1-10", "24-39-42-43-48-5-8", "6-12-18-25-41-2-6", "3-8-15-17-48-2-8", "4-17-25-28-44-5-11", "11-13-24-29-33-2-5", "8-10-26-32-42-9-12", "1-9-13-35-40-5-6", "5-10-23-31-37-3-11", "3-13-24-39-40-2-8", "27-30-31-41-43-5-8", "13-30-31-32-36-1-12", "6-9-10-13-37-1-7", "2-14-38-42-45-10-11", "6-9-12-30-39-4-10", "24-31-34-41-43-6-8", "13-30-35-36-40-2-6", "18-28-42-46-48-3-9", "2-12-19-34-44-6-10", "1-3-5-42-47-5-10"];
+
+function byId(id){return document.getElementById(id);}
+
+function parseLine(line){
+  var parts=line.trim().split("-");
+  if(parts.length!==7) return null;
+  var nums=[];
+  for(var i=0;i<7;i++){
+    var n=parseInt(parts[i],10);
+    if(isNaN(n)) return null;
+    nums.push(n);
+  }
+  var mains=nums.slice(0,5), stars=nums.slice(5);
+  var seen={};
+  for(i=0;i<mains.length;i++){
+    if(mains[i]<1||mains[i]>50||seen["m"+mains[i]]) return null;
+    seen["m"+mains[i]]=1;
+  }
+  for(i=0;i<stars.length;i++){
+    if(stars[i]<1||stars[i]>12||seen["s"+stars[i]]) return null;
+    seen["s"+stars[i]]=1;
+  }
+  return {mains:mains,stars:stars};
+}
+
+function parseAll(){
+  var raw=byId("draws").value.replace(/\\n/g,"\n");
+  var lines=raw.split(/\r?\n/);
+  var valid=[], errors=0;
+  for(var i=0;i<lines.length;i++){
+    if(!lines[i].trim()) continue;
+    var d=parseLine(lines[i]);
+    if(d) valid.push(d); else errors++;
+  }
+  return {valid:valid,errors:errors};
+}
+
+function load100(){
+  byId("draws").value=REAL_DRAWS.join(String.fromCharCode(10));
+  var check=parseAll();
+  if(check.valid.length===100 && check.errors===0){
+    byId("status").className="status ok";
+    byId("status").textContent="Самоперевірка успішна: завантажено 100 із 100 тиражів.";
+  } else {
+    byId("status").className="status bad";
+    byId("status").textContent="Помилка самоперевірки: прийнято "+check.valid.length+", помилок "+check.errors+".";
+  }
+}
+
+function top(freq,count){
+  var arr=[];
+  for(var k in freq) if(Object.prototype.hasOwnProperty.call(freq,k)) arr.push([parseInt(k,10),freq[k]]);
+  arr.sort(function(a,b){return b[1]-a[1]||a[0]-b[0];});
+  return arr.slice(0,count);
+}
+
+function renderBalls(target,data,isStar){
+  var el=byId(target); el.innerHTML="";
+  for(var i=0;i<data.length;i++){
+    var span=document.createElement("span");
+    span.className="ball"+(isStar?" star":"");
+    span.textContent=data[i][0];
+    span.title=data[i][1]+" появ";
+    el.appendChild(span);
+  }
+}
+
+function analyze(){
+  var parsed=parseAll();
+  if(parsed.valid.length===0){
+    byId("status").className="status bad";
+    byId("status").textContent="Не знайдено валідних тиражів.";
+    return;
+  }
+  var mf={},sf={},odd=0,even=0,sum=0;
+  for(var i=0;i<parsed.valid.length;i++){
+    var d=parsed.valid[i];
+    for(var j=0;j<5;j++){
+      var n=d.mains[j]; mf[n]=(mf[n]||0)+1; sum+=n; if(n%2) odd++; else even++;
+    }
+    for(j=0;j<2;j++){n=d.stars[j]; sf[n]=(sf[n]||0)+1;}
+  }
+  byId("status").className="status "+(parsed.errors?"bad":"ok");
+  byId("status").textContent="Прийнято "+parsed.valid.length+". Помилки: "+parsed.errors+".";
+  byId("summary").innerHTML=
+    '<div class="stat"><b>'+parsed.valid.length+'</b>тиражів</div>'+
+    '<div class="stat"><b>'+odd+' / '+even+'</b>непарні / парні</div>'+
+    '<div class="stat"><b>'+(sum/(parsed.valid.length*5)).toFixed(1)+'</b>середнє число</div>';
+  renderBalls("hot",top(mf,10),false);
+  renderBalls("stars",top(sf,6),true);
+}
+
+byId("load").onclick=function(){load100();analyze();};
+byId("clear").onclick=function(){byId("draws").value="";byId("status").className="status";byId("status").textContent="Поле очищено.";byId("summary").innerHTML="";byId("hot").innerHTML="";byId("stars").innerHTML="";};
+byId("analyze").onclick=analyze;
+})();
+</script>
+</body>
+</html>
