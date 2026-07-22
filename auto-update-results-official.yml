@@ -1,0 +1,338 @@
+name: Auto-update EuroMillions results
+
+on:
+  workflow_dispatch:
+  schedule:
+    # EuroMillions draws: Tuesday and Friday.
+    # Runs after the draw, with a second retry one hour later.
+    - cron: "30 22 * * 2,5"
+    - cron: "30 23 * * 2,5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: euromillions-results-update
+  cancel-in-progress: false
+
+jobs:
+  update-results:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Update draws.json from official National Lottery
+        run: |
+          python - <<'PY'
+          import html
+          import json
+          import re
+          import time
+          import urllib.error
+          import urllib.request
+          from datetime import datetime, timezone
+          from email.utils import parsedate_to_datetime
+          from html.parser import HTMLParser
+          from pathlib import Path
+
+          SOURCES = [
+              "https://www.national-lottery.co.uk/results/euromillions/draw-history",
+              "https://mobile.national-lottery.co.uk/results/euromillions/draw-history",
+              "https://www.lb.national-lottery.co.uk/results/euromillions/draw-history",
+          ]
+
+          OUTPUT_PATH = Path("draws.json")
+          USER_AGENT = (
+              "Mozilla/5.0 (X11; Linux x86_64) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/126.0 Safari/537.36"
+          )
+
+          class TextExtractor(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.parts = []
+
+              def handle_data(self, data):
+                  value = data.strip()
+                  if value:
+                      self.parts.append(value)
+
+              def get_text(self):
+                  return " ".join(self.parts)
+
+          def fetch_official_html():
+              last_error = None
+
+              for url in SOURCES:
+                  for attempt in range(4):
+                      request = urllib.request.Request(
+                          url,
+                          headers={
+                              "User-Agent": USER_AGENT,
+                              "Accept": "text/html,application/xhtml+xml",
+                              "Accept-Language": "en-GB,en;q=0.9",
+                              "Cache-Control": "no-cache",
+                          },
+                      )
+
+                      try:
+                          with urllib.request.urlopen(request, timeout=40) as response:
+                              body = response.read().decode("utf-8", "replace")
+
+                          if "EuroMillions draw history" not in body:
+                              raise RuntimeError(
+                                  "Official page did not contain the expected draw-history heading"
+                              )
+
+                          return url, body
+
+                      except (
+                          urllib.error.HTTPError,
+                          urllib.error.URLError,
+                          TimeoutError,
+                          RuntimeError,
+                      ) as error:
+                          last_error = error
+                          wait_seconds = 5 * (attempt + 1)
+                          print(
+                              f"Attempt {attempt + 1} failed for {url}: {error}. "
+                              f"Retrying in {wait_seconds}s..."
+                          )
+                          time.sleep(wait_seconds)
+
+              raise RuntimeError(
+                  f"All official National Lottery sources failed: {last_error}"
+              )
+
+          def parse_date(value):
+              if not value:
+                  return None
+
+              value = str(value).strip()
+
+              formats = (
+                  "%a %d %b %Y",
+                  "%d %b %Y",
+                  "%Y-%m-%d",
+                  "%Y-%m-%dT%H:%M:%S%z",
+              )
+
+              for fmt in formats:
+                  try:
+                      parsed = datetime.strptime(value, fmt)
+                      if parsed.tzinfo is None:
+                          parsed = parsed.replace(tzinfo=timezone.utc)
+                      return parsed
+                  except ValueError:
+                      pass
+
+              try:
+                  parsed = parsedate_to_datetime(value)
+                  if parsed.tzinfo is None:
+                      parsed = parsed.replace(tzinfo=timezone.utc)
+                  return parsed
+              except (TypeError, ValueError):
+                  return None
+
+          def parse_official_draws(page_html):
+              parser = TextExtractor()
+              parser.feed(page_html)
+              text = html.unescape(parser.get_text())
+              text = re.sub(r"\s+", " ", text)
+
+              pattern = re.compile(
+                  r"Date\s+"
+                  r"(?P<date>(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{2}\s+"
+                  r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4})"
+                  r".{0,250}?"
+                  r"Ball numbers\s+"
+                  r"(?P<n1>\d{1,2})\s*-\s*(?P<n2>\d{1,2})\s*-\s*"
+                  r"(?P<n3>\d{1,2})\s*-\s*(?P<n4>\d{1,2})\s*-\s*(?P<n5>\d{1,2})"
+                  r".{0,180}?"
+                  r"Lucky Stars\s+"
+                  r"(?P<s1>\d{1,2})\s*-\s*(?P<s2>\d{1,2})",
+                  re.IGNORECASE,
+              )
+
+              draws = []
+
+              for match in pattern.finditer(text):
+                  date_text = match.group("date").title()
+                  parsed_date = parse_date(date_text)
+                  numbers = sorted(
+                      int(match.group(name))
+                      for name in ("n1", "n2", "n3", "n4", "n5")
+                  )
+                  stars = sorted(
+                      int(match.group(name)) for name in ("s1", "s2")
+                  )
+
+                  if parsed_date is None:
+                      continue
+                  if len(set(numbers)) != 5 or not all(1 <= n <= 50 for n in numbers):
+                      continue
+                  if len(set(stars)) != 2 or not all(1 <= n <= 12 for n in stars):
+                      continue
+
+                  draws.append(
+                      {
+                          "date": parsed_date.date().isoformat(),
+                          "numbers": numbers,
+                          "stars": stars,
+                      }
+                  )
+
+              if not draws:
+                  raise RuntimeError(
+                      "No valid EuroMillions draws were parsed from the official page"
+                  )
+
+              return draws
+
+          def read_existing_draws():
+              if not OUTPUT_PATH.exists():
+                  return []
+
+              try:
+                  payload = json.loads(OUTPUT_PATH.read_text(encoding="utf-8"))
+              except (OSError, json.JSONDecodeError) as error:
+                  print(f"Existing draws.json could not be read: {error}")
+                  return []
+
+              source = payload.get("draws", []) if isinstance(payload, dict) else payload
+              if not isinstance(source, list):
+                  return []
+
+              cleaned = []
+
+              for draw in source:
+                  if not isinstance(draw, dict):
+                      continue
+
+                  numbers = draw.get("numbers")
+                  stars = draw.get("stars")
+                  parsed_date = parse_date(draw.get("date"))
+
+                  if not isinstance(numbers, list) or not isinstance(stars, list):
+                      continue
+
+                  try:
+                      numbers = sorted(int(number) for number in numbers)
+                      stars = sorted(int(star) for star in stars)
+                  except (TypeError, ValueError):
+                      continue
+
+                  if parsed_date is None:
+                      continue
+                  if len(numbers) != 5 or len(set(numbers)) != 5:
+                      continue
+                  if len(stars) != 2 or len(set(stars)) != 2:
+                      continue
+                  if not all(1 <= number <= 50 for number in numbers):
+                      continue
+                  if not all(1 <= star <= 12 for star in stars):
+                      continue
+
+                  cleaned.append(
+                      {
+                          "date": parsed_date.date().isoformat(),
+                          "numbers": numbers,
+                          "stars": stars,
+                      }
+                  )
+
+              return cleaned
+
+          source_url, page_html = fetch_official_html()
+          official_draws = parse_official_draws(page_html)
+          existing_draws = read_existing_draws()
+
+          # Official records win whenever the same draw date already exists.
+          by_date = {}
+
+          for draw in existing_draws:
+              by_date[draw["date"]] = draw
+
+          for draw in official_draws:
+              by_date[draw["date"]] = draw
+
+          merged = list(by_date.values())
+          merged.sort(
+              key=lambda draw: parse_date(draw["date"])
+              or datetime.min.replace(tzinfo=timezone.utc),
+              reverse=True,
+          )
+          merged = merged[:100]
+
+          if not merged:
+              raise RuntimeError("No valid draws were available after merging")
+
+          output = {
+              "updated_at": datetime.now(timezone.utc).isoformat(),
+              "source": source_url,
+              "source_type": "Official National Lottery draw-history page",
+              "count": len(merged),
+              "latest_draw_date": merged[0]["date"],
+              "draws": merged,
+          }
+
+          OUTPUT_PATH.write_text(
+              json.dumps(output, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print(f"Official draws parsed: {len(official_draws)}")
+          print(f"Total draws saved: {len(merged)}")
+          print(f"Latest draw: {merged[0]}")
+          print(f"Source: {source_url}")
+          PY
+
+      - name: Validate draws.json
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import date
+          from pathlib import Path
+
+          payload = json.loads(Path("draws.json").read_text(encoding="utf-8"))
+          draws = payload.get("draws", [])
+
+          if len(draws) < 40:
+              raise SystemExit("Validation failed: fewer than 40 draws")
+
+          latest = draws[0]
+          date.fromisoformat(latest["date"])
+
+          if len(latest["numbers"]) != 5 or len(set(latest["numbers"])) != 5:
+              raise SystemExit("Validation failed: latest main numbers are invalid")
+
+          if len(latest["stars"]) != 2 or len(set(latest["stars"])) != 2:
+              raise SystemExit("Validation failed: latest Lucky Stars are invalid")
+
+          print("Validation passed.")
+          print("Latest draw date:", latest["date"])
+          print("Latest numbers:", latest["numbers"], latest["stars"])
+          PY
+
+      - name: Commit updated results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add draws.json
+
+          if git diff --cached --quiet; then
+            echo "No changes in draws.json."
+          else
+            git commit -m "Update EuroMillions results from official source"
+            git push
+          fi
