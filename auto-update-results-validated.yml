@@ -1,0 +1,202 @@
+name: Auto-update EuroMillions results
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 22 * * 2,5"
+    - cron: "30 23 * * 2,5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: euromillions-results-update
+  cancel-in-progress: false
+
+jobs:
+  update-results:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install parser
+        run: python -m pip install --disable-pip-version-check requests beautifulsoup4
+
+      - name: Download and validate EuroMillions archive
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          import time
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+
+          import requests
+          from bs4 import BeautifulSoup
+
+          OUTPUT = Path("draws.json")
+          NOW = datetime.now(timezone.utc)
+          YEARS = [NOW.year, NOW.year - 1, NOW.year - 2]
+          MONTHS = {
+              name: number for number, name in enumerate(
+                  ["January", "February", "March", "April", "May", "June",
+                   "July", "August", "September", "October", "November", "December"],
+                  start=1,
+              )
+          }
+
+          session = requests.Session()
+          session.headers.update({
+              "User-Agent": (
+                  "Mozilla/5.0 (X11; Linux x86_64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/126.0 Safari/537.36"
+              ),
+              "Accept-Language": "en-GB,en;q=0.9",
+              "Cache-Control": "no-cache",
+          })
+
+          def fetch(url):
+              last_error = None
+              for attempt in range(4):
+                  try:
+                      response = session.get(
+                          url,
+                          timeout=40,
+                          params={"cache_bust": int(time.time())},
+                      )
+                      response.raise_for_status()
+                      if len(response.text) < 5000:
+                          raise RuntimeError("Downloaded page was unexpectedly short")
+                      return response.text
+                  except Exception as error:
+                      last_error = error
+                      time.sleep(5 * (attempt + 1))
+              raise RuntimeError(f"Could not fetch {url}: {last_error}")
+
+          def parse_archive(html, source_url):
+              soup = BeautifulSoup(html, "html.parser")
+              text = soup.get_text(" ", strip=True)
+              text = re.sub(r"\s+", " ", text)
+
+              date_pattern = re.compile(
+                  r"(Tuesday|Friday)\s*(\d{1,2})(?:st|nd|rd|th)?\s+"
+                  r"(January|February|March|April|May|June|July|August|"
+                  r"September|October|November|December)\s+(\d{4})",
+                  re.I,
+              )
+
+              matches = list(date_pattern.finditer(text))
+              draws = []
+
+              for index, match in enumerate(matches):
+                  end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+                  segment = text[match.end():end]
+
+                  # Results appear before the jackpot amount on archive pages.
+                  before_jackpot = segment.split("£", 1)[0]
+                  values = [int(x) for x in re.findall(r"(?<!\d)(\d{1,2})(?!\d)", before_jackpot)]
+
+                  if len(values) < 7:
+                      continue
+
+                  numbers = values[:5]
+                  stars = values[5:7]
+
+                  day = int(match.group(2))
+                  month = MONTHS[match.group(3).title()]
+                  year = int(match.group(4))
+                  draw_date = datetime(year, month, day, tzinfo=timezone.utc).date()
+
+                  if len(set(numbers)) != 5 or not all(1 <= n <= 50 for n in numbers):
+                      continue
+                  if len(set(stars)) != 2 or not all(1 <= n <= 12 for n in stars):
+                      continue
+                  if draw_date.weekday() not in (1, 4):
+                      continue
+
+                  draws.append({
+                      "date": draw_date.isoformat(),
+                      "numbers": numbers,
+                      "stars": stars,
+                      "source": source_url,
+                  })
+
+              return draws
+
+          all_draws = []
+          for year in YEARS:
+              url = f"https://www.national-lottery.com/amp/euromillions/results/{year}-archive"
+              html = fetch(url)
+              parsed = parse_archive(html, url)
+              print(f"{year}: parsed {len(parsed)} draws")
+              all_draws.extend(parsed)
+
+          by_date = {}
+          for draw in all_draws:
+              by_date[draw["date"]] = draw
+
+          draws = sorted(by_date.values(), key=lambda item: item["date"], reverse=True)
+
+          if len(draws) < 90:
+              raise RuntimeError(f"Safety check failed: only {len(draws)} valid draws parsed")
+
+          latest_date = datetime.fromisoformat(draws[0]["date"]).date()
+          age_days = (NOW.date() - latest_date).days
+
+          # Never overwrite the database with stale or future data.
+          if age_days < 0 or age_days > 8:
+              raise RuntimeError(
+                  f"Safety check failed: latest parsed draw is {draws[0]['date']} "
+                  f"({age_days} days old)"
+              )
+
+          # Verify the first four records alternate between Tuesday and Friday.
+          for draw in draws[:4]:
+              weekday = datetime.fromisoformat(draw["date"]).weekday()
+              if weekday not in (1, 4):
+                  raise RuntimeError(f"Invalid draw weekday: {draw['date']}")
+
+          draws = draws[:100]
+          for draw in draws:
+              draw.pop("source", None)
+
+          payload = {
+              "updated_at": NOW.isoformat(),
+              "source": "https://www.national-lottery.com/euromillions/results/history",
+              "source_type": "Validated EuroMillions archive",
+              "count": len(draws),
+              "latest_draw_date": draws[0]["date"],
+              "draws": draws,
+          }
+
+          OUTPUT.write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print("Validation passed.")
+          print("Latest:", draws[0])
+          print("Saved:", len(draws))
+          PY
+
+      - name: Commit updated results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add draws.json
+
+          if git diff --cached --quiet; then
+            echo "No result changes."
+          else
+            git commit -m "Update verified EuroMillions results"
+            git push
+          fi
