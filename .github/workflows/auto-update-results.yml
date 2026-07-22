@@ -1,0 +1,163 @@
+name: Auto-update EuroMillions results
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 22 * * 2"
+    - cron: "30 22 * * 5"
+
+permissions:
+  contents: write
+
+jobs:
+  update-results:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Update draws.json
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          API_URL = "https://euromillions.api.pedromealha.dev/draws"
+
+          request = urllib.request.Request(
+              API_URL,
+              headers={"User-Agent": "EuroMillions-Analyzer/1.0"}
+          )
+
+          with urllib.request.urlopen(request, timeout=30) as response:
+              payload = json.load(response)
+
+          if isinstance(payload, dict):
+              source_draws = (
+                  payload.get("draws")
+                  or payload.get("results")
+                  or payload.get("data")
+                  or []
+              )
+          else:
+              source_draws = payload
+
+          if not isinstance(source_draws, list) or not source_draws:
+              raise RuntimeError("API did not return a usable draws list")
+
+          normalized = []
+
+          for draw in source_draws:
+              if not isinstance(draw, dict):
+                  continue
+
+              numbers = (
+                  draw.get("numbers")
+                  or draw.get("main_numbers")
+                  or draw.get("mainNumbers")
+                  or draw.get("balls")
+              )
+
+              stars = (
+                  draw.get("stars")
+                  or draw.get("lucky_stars")
+                  or draw.get("luckyStars")
+              )
+
+              draw_date = (
+                  draw.get("date")
+                  or draw.get("draw_date")
+                  or draw.get("drawDate")
+              )
+
+              if not isinstance(numbers, list) or not isinstance(stars, list):
+                  continue
+
+              try:
+                  numbers = sorted(int(number) for number in numbers)
+                  stars = sorted(int(star) for star in stars)
+              except (TypeError, ValueError):
+                  continue
+
+              if len(numbers) != 5 or len(set(numbers)) != 5:
+                  continue
+
+              if len(stars) != 2 or len(set(stars)) != 2:
+                  continue
+
+              if not all(1 <= number <= 50 for number in numbers):
+                  continue
+
+              if not all(1 <= star <= 12 for star in stars):
+                  continue
+
+              normalized.append({
+                  "date": draw_date,
+                  "numbers": numbers,
+                  "stars": stars
+              })
+
+          if not normalized:
+              raise RuntimeError("No valid EuroMillions draws were found")
+
+          normalized.sort(
+              key=lambda draw: draw.get("date") or "",
+              reverse=True
+          )
+
+          unique_draws = []
+          seen = set()
+
+          for draw in normalized:
+              key = (
+                  draw.get("date"),
+                  tuple(draw["numbers"]),
+                  tuple(draw["stars"])
+              )
+
+              if key in seen:
+                  continue
+
+              seen.add(key)
+              unique_draws.append(draw)
+
+              if len(unique_draws) == 100:
+                  break
+
+          output = {
+              "updated_at": datetime.now(timezone.utc).isoformat(),
+              "source": API_URL,
+              "count": len(unique_draws),
+              "draws": unique_draws
+          }
+
+          Path("draws.json").write_text(
+              json.dumps(output, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+
+          print(f"Saved {len(unique_draws)} draws")
+          print(f"Latest draw: {unique_draws[0]}")
+          PY
+
+      - name: Commit updated results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add draws.json
+
+          if git diff --cached --quiet; then
+            echo "No new results to commit."
+          else
+            git commit -m "Auto-update EuroMillions results"
+            git push
+          fi
